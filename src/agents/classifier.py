@@ -1,17 +1,3 @@
-# from src.pipelines.pipeline import run_research_pipeline
-# from src.tools.tools import scrape_url, web_search
-
-# # search = web_search("Price hikes of phones, laptop, when it will saturate")
-# # search = scrape_url(
-# #     "https://www.buysellram.com/blog/memory-prices-expected-to-surge-again-in-q1-2026-putting-global-device-makers-under-severe-cost-pressure/"
-# # )
-# # print(search)
-
-
-# result = run_research_pipeline("What is the Impact of AI on job 2026")
-# print(result)
-
-
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
@@ -87,7 +73,7 @@ app = graph.compile()
 
 result = app.invoke(
     {
-        "query": "I can't login to my account, it says invalid password but I just reset it",
+        "query": "I was charged twice for my subscription this month",
         "category": "",
         "resolution": "",
         "final_response": "",

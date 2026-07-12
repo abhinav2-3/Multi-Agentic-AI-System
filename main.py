@@ -1,24 +1,10 @@
-# from src.pipelines.pipeline import run_research_pipeline
-# from src.tools.tools import scrape_url, web_search
-
-# # search = web_search("Price hikes of phones, laptop, when it will saturate")
-# # search = scrape_url(
-# #     "https://www.buysellram.com/blog/memory-prices-expected-to-surge-again-in-q1-2026-putting-global-device-makers-under-severe-cost-pressure/"
-# # )
-# # print(search)
-
-
-# result = run_research_pipeline("What is the Impact of AI on job 2026")
-# print(result)
-
-
-from typing import TypedDict
-from langgraph.graph import StateGraph, END
+from typing import Literal, TypedDict
+from langgraph.graph import START, StateGraph, END
 from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
 import os
 from dotenv import load_dotenv
-from pydantic import SecretStr
+from pydantic import BaseModel, Field, SecretStr
+from rich import print
 
 load_dotenv()
 
@@ -29,71 +15,189 @@ llm = ChatGroq(
 )
 
 
-class SupportState(TypedDict):
-    query: str
-    category: str
-    resolution: str
+# ---------------------------
+# Structured Output
+# ---------------------------
+
+
+class ModelStructure(BaseModel):
+    processed_input: str = Field(
+        description="A clean and formatted version of the user input."
+    )
+
+    tone: Literal["chitchat", "question", "search"] = Field(
+        description="Intent of the user."
+    )
+
+
+model = llm.with_structured_output(ModelStructure)
+
+
+# ---------------------------
+# Graph State
+# ---------------------------
+
+
+class AssistantState(TypedDict):
+    input: str
+    processed_input: str
+    tone: Literal["chitchat", "question", "search"]
+    chat_reply: str
+    question_answer: str
+    search_result: str
     final_response: str
 
 
-def classifier_agent(state: SupportState) -> SupportState:
-    messages: list[SystemMessage | HumanMessage] = [
-        SystemMessage(
-            content="Classify the query into one of: billing, technical, general. Reply with only the category word."
-        ),
-        HumanMessage(content=state["query"]),
-    ]
-    result = llm.invoke(messages)
-    state["category"] = str(result.content).strip().lower()
-    return state
+# ---------------------------
+# Agents
+# ---------------------------
 
 
-def resolver_agent(state: SupportState) -> SupportState:
-    messages: list[SystemMessage | HumanMessage] = [
-        SystemMessage(
-            content=f"You are a {state['category']} support expert. Resolve the issue concisely."
-        ),
-        HumanMessage(content=state["query"]),
-    ]
-    result = llm.invoke(messages)
-    state["resolution"] = str(result.content).strip()
-    return state
+def process_input(state: AssistantState):
+    promptInput = f"""
+     You are an input preprocessing assistant.
+
+    Your responsibilities:
+    1. Rewrite the user's message into a clean, grammatically correct version without changing its meaning.
+    2. Classify the user's intent into exactly one category.
+
+    Categories:
+    - chitchat → greetings, casual conversation, jokes, opinions.
+    - question → factual questions or requests that can be answered using your knowledge.
+    - search → questions requiring recent, live, or external information from the web.
+
+    Return only the structured output.
+
+    User message:
+    {state["input"]}
+     """
+
+    output = model.invoke(promptInput)
+    assert isinstance(output, ModelStructure)
+    return {"processed_input": output.processed_input, "tone": output.tone}
 
 
-def responder_agent(state: SupportState) -> SupportState:
-    messages: list[SystemMessage | HumanMessage] = [
-        SystemMessage(content="Write a polished, friendly customer support reply."),
-        HumanMessage(
-            content=f"Query: {state['query']}\nResolution: {state['resolution']}"
-        ),
-    ]
-    result = llm.invoke(messages)
-    state["final_response"] = str(result.content).strip()
-    return state
+def process_chit_chat(state: AssistantState):
+    promptInput = f"""
+     You are a friendly AI assistant.
+
+    Respond naturally to the user's message.
+
+    Keep the conversation engaging and concise.
+
+    User:
+    {state["processed_input"]}
+     """
+
+    output = llm.invoke(promptInput).content
+    return {"chat_reply": output}
 
 
-graph = StateGraph(SupportState)
+def process_question(state: AssistantState):
+    promptInput = f"""
+    You are an expert AI assistant.
 
-graph.add_node("classifier", classifier_agent)
-graph.add_node("resolver", resolver_agent)
-graph.add_node("responder", responder_agent)
+    Answer the user's question accurately.
 
-graph.set_entry_point("classifier")
-graph.add_edge("classifier", "resolver")
-graph.add_edge("resolver", "responder")
-graph.add_edge("responder", END)
+    If you are uncertain, clearly say so instead of making up information.
 
-app = graph.compile()
+    Question:
+    {state["processed_input"]}
+     """
 
-result = app.invoke(
-    {
-        "query": "I can't login to my account, it says invalid password but I just reset it",
-        "category": "",
-        "resolution": "",
-        "final_response": "",
-    }
-)
+    output = llm.invoke(promptInput).content
+    return {"question_answer": output}
 
-print("Category:", result["category"])
-print("Resolution:", result["resolution"])
-print("Final Response:", result["final_response"])
+
+def process_search(state: AssistantState):
+    promptInput = f"""
+    Pretend you are a web search tool.
+
+    The following query would normally be sent to a search engine.
+
+    Respond with:
+    "This would trigger a web search for: <query>"
+
+    Query:
+    {state["processed_input"]}
+     """
+
+    output = llm.invoke(promptInput).content
+    return {"search_result": output}
+
+
+def format_output(state: AssistantState):
+    if state["tone"] == "chitchat":
+        response = state["chat_reply"]
+
+    elif state["tone"] == "question":
+        response = state["question_answer"]
+
+    else:
+        response = state["search_result"]
+
+    return {"final_response": response}
+
+
+def classify_tone(
+    state: AssistantState,
+) -> Literal["chit_chat_node", "question_node", "search_node"]:
+    if state["tone"] == "chitchat":
+        return "chit_chat_node"
+    elif state["tone"] == "question":
+        return "question_node"
+    else:
+        return "search_node"
+
+
+# ---------------------------
+# Graph
+# ---------------------------
+
+graph = StateGraph(AssistantState)
+
+
+# ---------------------------
+# Register Nodes
+# ---------------------------
+
+graph.add_node("preprocess_node", process_input)
+
+graph.add_node("chit_chat_node", process_chit_chat)
+
+graph.add_node("question_node", process_question)
+
+graph.add_node("search_node", process_search)
+
+graph.add_node("format_output_node", format_output)
+
+
+# ---------------------------
+# Edges
+# ---------------------------
+
+graph.add_edge(START, "preprocess_node")
+
+
+graph.add_conditional_edges("preprocess_node", classify_tone)
+
+
+graph.add_edge("chit_chat_node", "format_output_node")
+
+graph.add_edge("question_node", "format_output_node")
+
+graph.add_edge("search_node", "format_output_node")
+
+
+graph.add_edge("format_output_node", END)
+
+
+# ---------------------------
+# Compile
+# ---------------------------
+
+workflow = graph.compile()
+
+result = workflow.invoke({"input": "Weather in Delhi today."})
+
+print(result)

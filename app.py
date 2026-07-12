@@ -1,5 +1,5 @@
 import streamlit as st
-from main import app as support_app
+from main2 import app as support_app
 
 st.set_page_config(page_title="Customer Support AI", page_icon="🤖", layout="centered")
 

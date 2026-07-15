@@ -1,10 +1,14 @@
-from typing import Literal, TypedDict
-from langgraph.graph import START, StateGraph, END
+from typing import Annotated, Literal, TypedDict
+from langchain.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import START, StateGraph, END, add_messages
 from langchain_groq import ChatGroq
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr
 from rich import print
+from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 
@@ -42,6 +46,7 @@ class AssistantState(TypedDict):
     input: str
     processed_input: str
     tone: Literal["chitchat", "question", "search"]
+    messages: Annotated[list[BaseMessage], add_messages]
     chat_reply: str
     question_answer: str
     search_result: str
@@ -78,51 +83,27 @@ def process_input(state: AssistantState):
 
 
 def process_chit_chat(state: AssistantState):
-    promptInput = f"""
-     You are a friendly AI assistant.
+    system_note = SystemMessage(
+        content="You are a friendly AI assistant. Respond naturally and concisely, using the conversation history for context."
+    )
 
-    Respond naturally to the user's message.
-
-    Keep the conversation engaging and concise.
-
-    User:
-    {state["processed_input"]}
-     """
-
-    output = llm.invoke(promptInput).content
+    output = llm.invoke([system_note] + state["messages"]).content
     return {"chat_reply": output}
 
 
 def process_question(state: AssistantState):
-    promptInput = f"""
-    You are an expert AI assistant.
-
-    Answer the user's question accurately.
-
-    If you are uncertain, clearly say so instead of making up information.
-
-    Question:
-    {state["processed_input"]}
-     """
-
-    output = llm.invoke(promptInput).content
+    system_note = SystemMessage(
+        content="You are an expert AI assistant. Answer accurately using conversation history for context. If uncertain, say so."
+    )
+    output = llm.invoke([system_note] + state["messages"]).content
     return {"question_answer": output}
 
 
 def process_search(state: AssistantState):
-    promptInput = f"""
-    Pretend you are a web search tool.
-
-    The following query would normally be sent to a search engine.
-
-    Respond with:
-    "This would trigger a web search for: <query>"
-
-    Query:
-    {state["processed_input"]}
-     """
-
-    output = llm.invoke(promptInput).content
+    system_note = SystemMessage(
+        content="Pretend you are a web search tool. Respond with: 'This would trigger a web search for: <query>'"
+    )
+    output = llm.invoke([system_note] + state["messages"]).content
     return {"search_result": output}
 
 
@@ -136,7 +117,7 @@ def format_output(state: AssistantState):
     else:
         response = state["search_result"]
 
-    return {"final_response": response}
+    return {"final_response": response, "messages": [AIMessage(content=response)]}
 
 
 def classify_tone(
@@ -162,13 +143,9 @@ graph = StateGraph(AssistantState)
 # ---------------------------
 
 graph.add_node("preprocess_node", process_input)
-
 graph.add_node("chit_chat_node", process_chit_chat)
-
 graph.add_node("question_node", process_question)
-
 graph.add_node("search_node", process_search)
-
 graph.add_node("format_output_node", format_output)
 
 
@@ -177,18 +154,10 @@ graph.add_node("format_output_node", format_output)
 # ---------------------------
 
 graph.add_edge(START, "preprocess_node")
-
-
 graph.add_conditional_edges("preprocess_node", classify_tone)
-
-
 graph.add_edge("chit_chat_node", "format_output_node")
-
 graph.add_edge("question_node", "format_output_node")
-
 graph.add_edge("search_node", "format_output_node")
-
-
 graph.add_edge("format_output_node", END)
 
 
@@ -196,8 +165,16 @@ graph.add_edge("format_output_node", END)
 # Compile
 # ---------------------------
 
-workflow = graph.compile()
+checkpointer = MemorySaver()
+workflow = graph.compile(checkpointer=checkpointer)
 
-result = workflow.invoke({"input": "Weather in Delhi today."})
+# config: RunnableConfig = {"configurable": {"thread_id": "user-1"}}
 
-print(result)
+# while True:
+#     user_input = input("Type here: ")
+#     print("User: ", user_input)
+#     result = workflow.invoke(
+#         {"input": user_input, "messages": [HumanMessage(content=user_input)]},
+#         config=config,
+#     )
+#     print("AI: ", result["messages"][-1].content)
